@@ -34,7 +34,7 @@ type State(projectOptions: FSharpProjectOptions, checkedProject: FSharpCheckProj
         member this.GetRootModule(fileName) =
             match Map.tryFind fileName rootModules with
             | Some rootModule -> rootModule
-            | None -> FableError("Cannot find root module for " + fileName) |> raise
+            | None -> failwithf "Cannot find root module for %s" fileName
         member this.GetOrAddEntity(fullName, generate) =
             entities.GetOrAdd(fullName, fun _ -> generate())
         member this.GetOrAddInlineExpr(fullName, generate) =
@@ -59,6 +59,19 @@ type Compiler() =
         options' <- defaultArg options options'
         plugins' <- defaultArg plugins plugins'
         logs.Clear()
+// type FableError(msg: string, ?range: SourceLocation, ?file: string) =
+//     inherit System.Exception(msg)
+//     member __.Range = range
+//     member __.File = file
+//     member __.FormattedMessage =
+//         match file with
+//         | Some file ->
+//             let range =
+//                 match range with
+//                 | Some r -> sprintf "%i, %i" r.start.line r.start.column
+//                 | None -> "1"
+//             sprintf "%s(%s) : error FABLE: %s" file range msg
+//         | None -> msg
     interface ICompiler with
         member __.Options = options'
         member __.Plugins = plugins'
@@ -83,8 +96,7 @@ let loadPlugins pluginPaths (loadedPlugins: PluginInfo list) =
                     { path = path
                     ; plugin = Activator.CreateInstance x :?> IPlugin })
             with
-            | :? FableError as er -> raise er
-            | ex -> FableError(sprintf "Cannot load plugin %s: %s" path ex.Message) |> raise)
+            | ex -> failwithf "Cannot load plugin %s: %s" path ex.Message)
     |> Seq.toList
 
 /// Returns an (errors, warnings) tuple
@@ -102,22 +114,22 @@ let parseErrors errors =
     |> Array.partition fst
     |> fun (ers, wns) -> Array.map snd ers, Array.map snd wns
 
-let parseFSharpProject (checker: FSharpChecker) (projOptions: FSharpProjectOptions) =
+let parseFSharpProject (checker: FSharpChecker) (projOptions: FSharpProjectOptions) (com: ICompiler) =
     printfn "Parsing F# project..."
     let checkProjectResults =
         projOptions
         |> checker.ParseAndCheckProject
         |> Async.RunSynchronously
-    let errors, warnings =
-        parseErrors checkProjectResults.Errors
-    if errors.Length = 0
-    then
-        printfn "F# project parsed successfully"
-        warnings |> Array.map Warning, checkProjectResults
-    else errors
-        |> Seq.append ["F# project contains errors:"]
-        |> String.concat "\n"
-        |> FableError |> raise
+    for err in checkProjectResults.Errors do
+        let severity =
+            match er.Severity with
+            | FSharpErrorSeverity.Warning -> Warning
+            | FSharpErrorSeverity.Error -> Error
+        let range =
+            { start={ line=er.StartLine; column=er.StartColumn}
+            ; ``end``{ line=er.EndLine; column=er.EndColumn} }
+        com.AddLog(er.Message, severity, range, er.FileName, "FSHARP")
+    checkProjectResults
 
 let createState checker projectOptions (com: ICompiler) (define: string[]) projFile =
     let projectOptions =
@@ -132,10 +144,7 @@ let createState checker projectOptions (com: ICompiler) (define: string[]) projF
                 for file in projectOptions.ProjectFileNames do
                     printfn "   %s" file
             projectOptions
-    let logs, checkedProject =
-        parseFSharpProject checker projectOptions
-    for log in logs do
-        com.AddLog(log)
+    let checkedProject = parseFSharpProject checker projectOptions com
     State(projectOptions, checkedProject)
 
 let toJsonAndReply =
@@ -150,12 +159,6 @@ let toJsonAndReply =
 let sendError replyChannel (ex: Exception) =
     let rec innerStack (ex: Exception) =
         if isNull ex.InnerException then ex.StackTrace else innerStack ex.InnerException
-    match ex with
-    | :? FableError as err ->
-        let errMessage = err.FormattedMessage
-        // Don't print stack trace for known Fable errors
-        printfn "%s" errMessage
-        ["error", errMessage] |> dict |> toJsonAndReply replyChannel
     | ex ->
         let stack = innerStack ex
         printfn "ERROR: %s\n%s" ex.Message stack
@@ -196,8 +199,7 @@ let updateState (checker: FSharpChecker) (com: Compiler) (state: State option)
             | false, _ when fileName.EndsWith(".fsx") ->
                 createState checker None com define fileName
             | false, _ ->
-                sprintf "%s doesn't belong to project %s" fileName state.ProjectFile
-                |> FableError |> raise
+                failwithf "%s doesn't belong to project %s" fileName state.ProjectFile
     | None -> createFromScratch()
 
 let compile (com: Compiler) (state: State) (fileName: string) =

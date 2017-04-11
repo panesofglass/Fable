@@ -42,7 +42,7 @@ let private (|BaseCons|_|) com ctx (fsExpr: FSharpExpr) =
         | None -> false
     let validateGenArgs' typArgs =
         tryDefinition fsExpr.Type |> Option.iter (fun tdef ->
-            validateGenArgs ctx (makeRangeFrom fsExpr) tdef.GenericParameters typArgs)
+            validateGenArgs com ctx (makeRangeFrom fsExpr) tdef.GenericParameters typArgs)
     match fsExpr with
     | BasicPatterns.NewObject(meth, typArgs, args) ->
         match ctx.baseClass with
@@ -54,8 +54,8 @@ let private (|BaseCons|_|) com ctx (fsExpr: FSharpExpr) =
         match ctx.baseClass with
         | Some baseFullName when meth.CompiledName = ".ctor" && equalsEntName meth baseFullName ->
             if not meth.IsImplicitConstructor then
-                FableError("Inheritance is only possible with base class primary constructor: "
-                            + baseFullName, makeRange fsExpr.Range) |> raise
+                "Inheritance is only possible with base class primary constructor: " + baseFullName
+                |> addError com ctx.fileName (makeRange fsExpr.Range |> Some)
             validateGenArgs' typArgs
             Some (meth, args)
         | _ -> None
@@ -114,7 +114,7 @@ and private transformNonListNewUnionCase com ctx (fsExpr: FSharpExpr) fsType uni
         failwithf "transformNonListNewUnionCase must not be used with List %O" range
     | OtherType ->
         let argExprs =
-            let tag = getUnionCaseIndex fsExpr.Range fsType unionCase.Name |> makeIntConst
+            let tag = getUnionCaseIndex fsType unionCase.Name |> makeIntConst
             let argTypes =
                 unionCase.UnionCaseFields
                 |> Seq.map (fun x -> makeType com [] x.FieldType)
@@ -140,7 +140,7 @@ and private transformComposableExpr com ctx fsExpr argExprs =
     | BasicPatterns.NewObject(meth, typArgs, _) ->
         let r, typ = makeRangeFrom fsExpr, makeType com ctx.typeArgs fsExpr.Type
         tryDefinition fsExpr.Type |> Option.iter (fun tdef ->
-            validateGenArgs ctx r tdef.GenericParameters typArgs)
+            validateGenArgs com ctx r tdef.GenericParameters typArgs)
         makeCallFrom com ctx r typ meth (typArgs, []) None argExprs
     | BasicPatterns.NewUnionCase(fsType, unionCase, _) ->
         transformNonListNewUnionCase com ctx fsExpr fsType unionCase argExprs
@@ -608,7 +608,7 @@ and private transformExpr (com: IFableCompiler) ctx fsExpr =
     | BasicPatterns.NewObject(meth, typArgs, args) ->
         let r, typ = makeRangeFrom fsExpr, makeType com ctx.typeArgs fsExpr.Type
         tryDefinition fsExpr.Type |> Option.iter (fun tdef ->
-            validateGenArgs ctx r tdef.GenericParameters typArgs)
+            validateGenArgs com ctx r tdef.GenericParameters typArgs)
         List.map (com.Transform ctx) args
         |> makeCallFrom com ctx r typ meth (typArgs, []) None
 
@@ -680,7 +680,7 @@ and private transformExpr (com: IFableCompiler) ctx fsExpr =
         | PojoUnion ->
             makeStrConst unionCase.Name |> checkCase "type"
         | OtherType ->
-            getUnionCaseIndex fsExpr.Range fsType unionCase.Name
+            getUnionCaseIndex fsType unionCase.Name
             |> makeIntConst
             |> checkCase "tag"
 
@@ -965,7 +965,7 @@ let private transformMemberDecl (com: IFableCompiler) ctx (declInfo: DeclInfo)
             | None ->
                 let info =
                     { isInstance = meth.IsInstanceMember
-                    ; passGenerics = hasPassGenericsAtt meth }
+                    ; passGenerics = hasPassGenericsAtt com ctx meth }
                 bindMemberArgs com ctx info args
                 |> fun (ctx, _, args, extraArgs) ->
                     if memberLoc <> Fable.StaticLoc

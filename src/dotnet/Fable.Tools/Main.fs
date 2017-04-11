@@ -2,6 +2,7 @@ module Fable.Tools.Main
 
 open System
 open System.IO
+open System.Diagnostics
 open System.Reflection
 open System.Runtime.InteropServices
 open Microsoft.FSharp.Compiler.SourceCodeServices
@@ -21,7 +22,7 @@ let startProcess workingDir fileName args =
         else fileName, args
     printfn "CWD: %s" workingDir
     printfn "%s %s" fileName args
-    let p = new System.Diagnostics.Process()
+    let p = new Process()
     p.StartInfo.FileName <- fileName
     p.StartInfo.Arguments <- args
     p.StartInfo.WorkingDirectory <- workingDir
@@ -75,6 +76,20 @@ let debug (projFile: string) (define: string[]) =
     with
     | ex -> printfn "ERROR: %s\n%s" ex.Message ex.StackTrace
 
+let startServer port timeout onMessage continuation =
+    try
+        let work = Server.start port timeout onMessage
+        continuation work
+    with
+    | ex ->
+        printfn "Cannot start server, please check the port %i is free: %s"
+            port ex.Message
+
+let stopServerAndKillProcess port (proc: Process) =
+    Server.stop port |> Async.RunSynchronously
+    printfn "Killing process..."
+    proc.Kill()
+
 [<EntryPoint>]
 let main argv =
     match Array.tryHead argv with
@@ -99,42 +114,41 @@ let main argv =
     | Some "start" ->
         let port, timeout = argv.[1..] |> argsToMap |> getPortAndTimeout
         let agent = startAgent()
-        Server.start port timeout agent.Post |> Async.RunSynchronously
+        startServer port timeout agent.Post <| fun listen ->
+            Async.RunSynchronously listen
     | Some "npm-run" ->
         let argsMap = argv.[2..] |> argsToMap
         let port, _ = argsMap |> getPortAndTimeout
         let agent = startAgent()
-        Server.start port -1 agent.Post |> Async.Start
-        let workingDir = Directory.GetCurrentDirectory()
-        let npmCommand =
-            match Map.tryFind "args" argsMap with
-            | Some npmArgs -> "run " + argv.[1] + " -- " + npmArgs
-            | None -> "run " + argv.[1]
-        let p = startProcess workingDir "npm" npmCommand
-        Console.CancelKeyPress.Add (fun _ ->
-            printfn "Killing process..."
-            p.Kill()
-            Server.stop port |> Async.RunSynchronously)
-        p.WaitForExit()
-        Server.stop port |> Async.RunSynchronously
+        startServer port -1 agent.Post <| fun listen ->
+            Async.Start listen
+            let workingDir = Directory.GetCurrentDirectory()
+            let npmCommand =
+                match Map.tryFind "args" argsMap with
+                | Some npmArgs -> "run " + argv.[1] + " -- " + npmArgs
+                | None -> "run " + argv.[1]
+            let p = startProcess workingDir "npm" npmCommand
+            Console.CancelKeyPress.Add(fun _ ->
+                stopServerAndKillProcess port p)
+            p.WaitForExit()
+            Server.stop port |> Async.RunSynchronously
     | Some ("webpack" | "webpack-dev-server" as webpack) ->
         let argsMap = argv.[1..] |> argsToMap
         let port, _ = argsMap |> getPortAndTimeout
         let agent = startAgent()
-        Server.start port -1 agent.Post |> Async.Start
-        let workingDir = Directory.GetCurrentDirectory()
-        let webpackScript =
-            let webpackScript = Path.Combine(findPackageJsonDir workingDir, "node_modules", webpack, "bin", webpack + ".js")
-            match Map.tryFind "args" argsMap with
-            | Some args -> webpackScript + " " + args
-            | None -> webpackScript
-        let p = startProcess workingDir "node" webpackScript
-        Console.CancelKeyPress.Add (fun _ ->
-            printfn "Killing process..."
-            p.Kill()
-            Server.stop port |> Async.RunSynchronously)
-        p.WaitForExit()
-        Server.stop port |> Async.RunSynchronously
+        startServer port -1 agent.Post <| fun listen ->
+            Async.Start listen
+            let workingDir = Directory.GetCurrentDirectory()
+            let webpackScript =
+                let webpackScript = Path.Combine(findPackageJsonDir workingDir, "node_modules", webpack, "bin", webpack + ".js")
+                match Map.tryFind "args" argsMap with
+                | Some args -> webpackScript + " " + args
+                | None -> webpackScript
+            let p = startProcess workingDir "node" webpackScript
+            Console.CancelKeyPress.Add(fun _ ->
+                stopServerAndKillProcess port p)
+            p.WaitForExit()
+            Server.stop port |> Async.RunSynchronously
     | Some "add" ->
         let packages = argv.[1..]
         let workingDir = Directory.GetCurrentDirectory()
